@@ -1,0 +1,8 @@
+*.swp
+*.swo
+.DS_Store
+
+# First-run generated (the plugins dashboard writes this when the example is run)
+examples/lua/
+doc/tags
+.panvimdoc/

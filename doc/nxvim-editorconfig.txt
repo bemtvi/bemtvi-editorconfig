@@ -1,0 +1,247 @@
+*nxvim-editorconfig.txt*                        EditorConfig support for nxvim
+
+==============================================================================
+Table of Contents                       *nxvim-editorconfig-table-of-contents*
+
+1. Install                                        |nxvim-editorconfig-install|
+2. Properties                                  |nxvim-editorconfig-properties|
+3. Resolution                                  |nxvim-editorconfig-resolution|
+4. Live reload                                |nxvim-editorconfig-live-reload|
+5. Toggles                                        |nxvim-editorconfig-toggles|
+6. API                                                |nxvim-editorconfig-api|
+  - setup                                       |nxvim-editorconfig-api-setup|
+  - properties                             |nxvim-editorconfig-api-properties|
+  - resolve                                   |nxvim-editorconfig-api-resolve|
+7. How it works                              |nxvim-editorconfig-how-it-works|
+8. Tests                                            |nxvim-editorconfig-tests|
+
+EditorConfig support for nxvim, built entirely on the native `nx.*` plugin API
+— nothing about `.editorconfig` lives in the editor core.
+
+Open a file and the plugin walks the directory tree upward from it, reads every
+`.editorconfig` along the way (stopping at one that declares `root = true`),
+matches the path against each `[glob]` section, and applies the merged
+properties to that buffer's options. Every filesystem read goes through the
+async `nx.fs` seam, so it never blocks the editor tick and works the same
+locally, over a daemon, and in the browser.
+
+Editing a project's `.editorconfig` in the editor and writing it re-applies
+the new rules to the open buffers straight away — no reload.
+
+                                                          *nxvim-editorconfig*
+
+
+==============================================================================
+1. Install                                        *nxvim-editorconfig-install*
+
+Put the repo on your `runtimepath` — with `nx.plugins`, or any plugin
+manager. `plugin/nxvim-editorconfig.lua` auto-sources on load and registers
+everything with defaults, so there is nothing to configure:
+
+>lua
+    nx.plugins({
+      { "nxvim/nxvim-editorconfig" },
+    })
+<
+
+Run `:PluginSync` to clone it. That is the whole setup — open a file in a
+project that has a `.editorconfig` and its rules are in effect.
+
+
+==============================================================================
+2. Properties                                  *nxvim-editorconfig-properties*
+
+These EditorConfig properties map onto a real nxvim option and are applied:
+
+>
+    indent_style              ->  'expandtab'                  tab => off, space => on
+    indent_size               ->  'shiftwidth' + 'softtabstop' (and 'tabstop' when tab_width is unset)
+    tab_width                 ->  'tabstop'
+    end_of_line               ->  'fileformat'                 lf => unix, crlf => dos, cr => mac
+    charset                   ->  'fileencoding'               (+ 'bomb' for utf-8-bom)
+    trim_trailing_whitespace  ->  strips trailing spaces/tabs on write
+    insert_final_newline      ->  always satisfied (see below)
+<
+
+`indent_size = tab` means "follow `tab_width`". An `indent_size` with no
+`tab_width` also sets `'tabstop'`, per the spec. A property set to `unset`
+reverts to unspecified.
+
+`trim_trailing_whitespace = true` runs on `BufWritePre`, which in nxvim fires
+_before_ the buffer is serialized, so the trimmed text is what reaches disk. It
+is one edit spanning the first to the last changed line, so the whole trim
+undoes in a single `u`.
+
+`insert_final_newline` needs no work to satisfy in the `true` direction:
+nxvim's rope always keeps one trailing newline, and `:w` writes the rope
+as-is, so a saved file always ends with exactly one. Setting it to `false` asks
+for the opposite, which nxvim cannot express (there is no `'endofline'`-style
+option) — so instead of ignoring it, the plugin warns once per buffer.
+
+`max_line_length` is resolved but not applied: nxvim has no `'textwidth'`. Per
+the EditorConfig spec, any property that is not recognized at all is simply
+ignored. Everything resolved — applied or not — is readable through
+`properties()` below, so a config can act on it itself:
+
+>lua
+    local props = require("nxvim-editorconfig").properties(0)
+    if props and props.max_line_length then
+      vim.o.colorcolumn = props.max_line_length
+    end
+<
+
+
+==============================================================================
+3. Resolution                                  *nxvim-editorconfig-resolution*
+
+The rules follow the EditorConfig specification:
+
+- The search walks up from the file's directory and stops at the first `.editorconfig` whose
+    preamble says `root = true`.
+- Files are merged **farthest first**, so the nearest `.editorconfig` wins on a conflict; within
+    one file, a later matching `[section]` overrides an earlier one.
+- A section header with no `/` matches the **basename** at any depth (`[*.py]` matches
+    `deep/nested/app.py`). A leading `/` anchors to the config's own directory. Any other `/` makes
+    the glob relative to that directory.
+- Glob syntax: `*` (any run not crossing `/`), `**` (any run including `/`), `?` (one character),
+    `[abc]` / `[a-c]` / `[!abc]` classes, `{a,b}` alternation, and `{1..9}` numeric ranges.
+
+A buffer opened by a relative path (`nxvim src/main.rs`, `:e sub/file.txt`) is
+resolved against the editor's working directory first, so the walk still
+reaches the project root.
+
+
+==============================================================================
+4. Live reload                                *nxvim-editorconfig-live-reload*
+
+Writing a `.editorconfig` from inside the editor re-resolves — and re-applies
+— every open buffer that the written file governs (the ones under its
+directory). So this takes effect immediately:
+
+>
+    :e .editorconfig       " change indent_size = 4 to 2
+    :w
+<
+
+Buffers under that directory pick the change up with no `:e!` and no restart.
+
+A property the edit **stops** specifying reverts to the value the buffer had
+before the plugin first touched it, so deleting a rule undoes it instead of
+leaving the old value stuck. Options the plugin never set are never touched, so
+a manual `:setlocal` on one survives.
+
+Only writes _through the editor_ are caught — that is the case that matters,
+since you edited the project's rules. A change made outside the editor (a
+`git checkout`, another editor) applies the next time the file is read.
+
+
+==============================================================================
+5. Toggles                                        *nxvim-editorconfig-toggles*
+
+The same surface neovim's built-in editorconfig exposes:
+
+>lua
+    vim.g.editorconfig = false          -- off globally (default: on)
+    vim.b.editorconfig = false          -- off for the current buffer
+    vim.b[bufnr].editorconfig = false   -- ...or a specific one
+<
+
+A buffer's explicit value wins over the global one. Both are read on every
+resolution, so flipping either takes effect from the next resolution onward —
+for the current buffer, `:e!` to re-fire it.
+
+Opting one filetype out while leaving the rest on:
+
+>lua
+    nx.on("FileType", function(args)
+      if args.match == "markdown" then
+        -- Prose: let your own settings win, not the project's .editorconfig.
+        vim.b[args.buf].editorconfig = false
+      end
+    end)
+<
+
+`setup({ enabled = false })` is the load-time equivalent: it registers no
+autocmds at all, leaving the plugin inert for the session.
+
+
+==============================================================================
+6. API                                                *nxvim-editorconfig-api*
+
+
+SETUP                                           *nxvim-editorconfig-api-setup*
+
+`require("nxvim-editorconfig").setup(opts)`
+
+Registers the autocmds that drive everything. `plugin/nxvim-editorconfig.lua`
+calls it for you when the plugin loads, so you only call it to reconfigure.
+Re-running is safe — the augroup is cleared first. `opts.enabled = false`
+registers nothing.
+
+
+PROPERTIES                                 *nxvim-editorconfig-api-properties*
+
+`require("nxvim-editorconfig").properties(bufnr)`
+
+The EditorConfig properties resolved for `bufnr` (`0` or omitted = the current
+buffer), as a raw `{ key = value }` table with every value a string —
+including properties the plugin does not act on, so you can act on them
+yourself. Returns `nil` until the buffer's (async) resolution has settled.
+
+
+RESOLVE                                       *nxvim-editorconfig-api-resolve*
+
+`require("nxvim-editorconfig").resolve(bufnr, file)`
+
+Resolve `file` and apply it to `bufnr`, returning a promise that fulfils when
+the options are set. The autocmds call this; you only need it to force a
+resolution by hand.
+
+
+==============================================================================
+7. How it works                              *nxvim-editorconfig-how-it-works*
+
+Everything is public `nx.*`, and worth reading if you are writing a plugin:
+
+- `nx.on` / `nx.augroup` — `BufReadPost` / `BufNewFile` drive the first resolution, `BufWritePre`
+    the trim, `BufWritePost` the live reload, `BufDelete` the cleanup.
+- `nx.fs.read_text` inside `nx.async` / `nx.await` — the upward walk is a chain of async reads, so
+    a slow or remote filesystem never stalls a keystroke.
+- `nx.utils.ancestors` / `nx.fname.modify` — the upward directory walk and the relative→absolute
+    resolution behind it.
+- `nx.bo[bufnr]` — the buffer options the properties map onto.
+- `nx.buf.lines` / `nx.buf.set_lines` — the trim reads the buffer mirror, rejects a line in O(1)
+    (only a line whose last byte is a space or tab can have trailing whitespace, so the pattern match
+    runs solely on lines that need it), and issues at most ONE edit. The obvious
+    `nx.cmd([[%s/\s+$//]])` is 2–12x slower on the same buffer — it runs the regex engine over every
+    line even when nothing matches — and echoes `E486: Pattern not found` on every save of an
+    already-clean file, since nxvim's `:s` has no `e` flag and no `silent!`.
+
+The glob dialect is the plugin's own (`nxvim-editorconfig.glob`): brace
+expansion into plain globs, then a backtracking matcher. The parser
+(`nxvim-editorconfig.parse`) turns one file into its `root` flag plus its
+sections in file order.
+
+
+==============================================================================
+8. Tests                                            *nxvim-editorconfig-tests*
+
+The suite runs a real editor headlessly:
+
+>sh
+    nxvim --test-plugin .
+<
+
+The help file is generated from `doc/nxvim-editorconfig.md` by
+`scripts/gen-vimdoc.sh`; a pre-push hook (`pre-commit install --hook-type
+pre-push`) fails if the committed `.txt` is stale.
+
+`test/glob_spec.lua` and `test/parse_spec.lua` cover the dialect and the parser
+directly; `test/apply_spec.lua` lays out real projects in a temp directory,
+opens files in them, and asserts on the resulting buffer options;
+`test/live_spec.lua` covers the write-driven reload and the revert;
+`test/write_spec.lua` asserts the trim on the bytes that reach disk.
+
+Generated by panvimdoc <https://github.com/kdheepak/panvimdoc>
+
+vim:tw=78:ts=8:noet:ft=help:norl:

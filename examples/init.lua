@@ -38,11 +38,25 @@ nx.plugins({
 --
 --    A buffer's explicit value wins over the global one. For example, opt one
 --    filetype out while leaving the rest on:
-nx.on("FileType", function(args)
+--
+--    This works even though `FileType` runs a stage AFTER the resolution: nxvim's
+--    read chain is gated (BufReadPost -> settle -> FileType -> BufEnter ->
+--    BufWinEnter), and the plugin re-reads the flag at the end of it, reverting what
+--    it applied. Which is also why the print below already sees the project's value.
+nx.on("FileType", {}, function(args)
   if args.match == "markdown" then
     -- Prose: let your own settings win, not the project's .editorconfig.
     vim.b[args.buf].editorconfig = false
   end
+end)
+
+-- 1b. The ordering guarantee, made visible: this runs on FileType, one stage behind
+--     the resolution, so `shiftwidth` is already the .editorconfig value rather than
+--     the default it would otherwise have raced.
+nx.on("FileType", {}, function(args)
+  nx.notify(
+    ("FileType %s: shiftwidth is already %d"):format(args.match, nx.bo[args.buf].shiftwidth)
+  )
 end)
 
 -- 2. Inspect the resolved properties for a buffer (handy for debugging a project's
@@ -88,7 +102,20 @@ end)
 --    `indent_style = space` line the same way and `:set expandtab?` reverts to the
 --    `noexpandtab` the buffer had before EditorConfig ever touched it.
 --
--- 6. Trim-on-save: `app.py` has `trim_trailing_whitespace = true`. Type
+-- 6. Ordering: every one of those opens echoes
+--      FileType python: shiftwidth is already 4
+--    from the handler in section 1b — the project's value, not the default, because
+--    the read chain waits for the resolution before firing `FileType`.
+--
+-- 7. Per-filetype opt-out: `:e examples/notes.md` -> `i<Tab>x<Esc>` does NOT insert
+--    the project's four spaces, because section 1 flipped
+--    `vim.b[buf].editorconfig = false` for markdown. Note the echo from 1b still says
+--    `shiftwidth is already 4` — at `FileType` it was; the opt-out set there is
+--    honored one stage later, at `BufWinEnter`, which puts the option back.
+--    `:EditorConfigShow` still lists the properties (they did resolve); they are just
+--    no longer applied to this buffer.
+--
+-- 8. Trim-on-save: `app.py` has `trim_trailing_whitespace = true`. Type
 --    `Gotrailing   <Esc>` (a new last line ending in spaces), `:w`, then reopen with
 --    `:e!` -> the spaces are gone from the saved file. The whole trim is ONE undo
 --    step, so a single `u` right after the write brings them back.

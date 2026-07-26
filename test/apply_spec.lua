@@ -200,4 +200,74 @@ nx.test.describe("nxvim-editorconfig", function()
     t:cmd("edit! " .. file)
     expect_opt(t, "shiftwidth", 6)
   end)
+
+  -- The read chain is gated: `BufReadPost` -> settle -> `FileType`. Because the read
+  -- handler RETURNS its promise, a `FileType` handler — where ftplugins, LSP attach
+  -- and buffer-local maps live — sees the EditorConfig options already applied rather
+  -- than the defaults it would have raced. Drop the `return` in `on_open` and this
+  -- fails, which is the point of asserting it.
+  nx.test.it("has applied the options before FileType runs", function(t)
+    write(ROOT, ".editorconfig", "root = true\n[*]\nindent_style = space\nindent_size = 3\n")
+    local file = write(ROOT, "seen.lua", "return {}\n")
+
+    local seen
+    local id = nx.on("FileType", { pattern = "lua" }, function(ev)
+      -- First announce only: FileType also fires on a later `:set ft=`, and the
+      -- first observation is the one the ordering claim is about.
+      if seen == nil and nx.buf.name(ev.buf) ~= "" then
+        seen = { shiftwidth = nx.bo[ev.buf].shiftwidth, expandtab = nx.bo[ev.buf].expandtab }
+      end
+    end)
+
+    t:cmd("edit " .. file)
+    t:wait_for(function()
+      return seen
+    end, { tries = 200, interval = 20, message = "FileType never fired for the buffer" })
+    nx.off(id)
+
+    nx.test.expect(seen.shiftwidth).to_be(3)
+    nx.test.expect(seen.expandtab).to_be(true)
+  end)
+
+  -- The documented way to opt one filetype out is a `FileType` handler flipping
+  -- `vim.b[buf].editorconfig`. That runs a whole stage AFTER the resolution, so the
+  -- flag can only work if the plugin re-reads it at the end of the read chain and
+  -- puts back what it applied.
+  nx.test.it("honors an opt-out set from a FileType handler", function(t)
+    write(ROOT, ".editorconfig", "root = true\n[*]\nindent_style = space\nindent_size = 5\n")
+    local file = write(ROOT, "optout.lua", "return {}\n")
+
+    local id = nx.on("FileType", { pattern = "lua" }, function(ev)
+      vim.b[ev.buf].editorconfig = false
+    end)
+    t:cmd("edit " .. file)
+    t:sleep(300)
+    nx.off(id)
+
+    nx.test.expect(nx.bo.shiftwidth).never.to_be(5)
+    nx.test.expect(nx.bo.expandtab).to_be(false)
+    vim.b[t:buf()].editorconfig = nil
+  end)
+
+  -- `'buftype'` is the canonical "is this a real file" signal, and the gate matters
+  -- more now that the read chain waits on us: a scratch surface must not park
+  -- `FileType` behind a filesystem walk (nor have `'expandtab'` set on it).
+  nx.test.it("ignores a buffer that is not an ordinary file", function(t)
+    write(ROOT, ".editorconfig", "root = true\n[*]\nindent_style = space\nindent_size = 7\n")
+
+    -- The quickfix window is a real non-file surface the core models (`'buftype'` is
+    -- `quickfix`), and it has a name, so the skip below can only come from the buftype
+    -- gate and not from the "no file name" arm above it.
+    t:cmd("cd " .. ROOT)
+    t:cmd("copen")
+    local buf = t:buf()
+    nx.test.expect(nx.bo[buf].buftype).to_be("quickfix")
+    ec._files[buf] = nil -- an earlier spec may have tracked this bufnr
+    nx.autocmd.exec("BufReadPost", { buffer = buf })
+
+    t:sleep(200)
+    nx.test.expect(ec._files[buf]).to_be(nil)
+    nx.test.expect(nx.bo[buf].shiftwidth).never.to_be(7)
+    t:cmd("cclose")
+  end)
 end)

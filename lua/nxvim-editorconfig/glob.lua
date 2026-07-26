@@ -8,6 +8,27 @@
 --
 -- Exported (rather than kept private to `init.lua`) because the matcher is the part
 -- with the most corner cases, and the test suite exercises it directly.
+--
+-- **Why not `nx.glob`?** nxvim now ships one glob engine (`nx.glob`, globset compiled
+-- to a cached Rust regex), and a plugin carrying its own matcher deserves a reason.
+-- EditorConfig's dialect is genuinely a different language, on two counts — both
+-- pinned as tests in `test/glob_spec.lua`, so the day the core grows this dialect the
+-- pins fail and this module can go:
+--
+-- ```
+-- **        EditorConfig: crosses `/` ANYWHERE, so `**.js` matches `a/b/c.js` and
+--           `a**z` matches `a/mn/z`. nx.glob (shell/gitignore): `**` is recursive
+--           only as a whole path component, so `**.js` degrades to `[^/]*[^/]*\.js`
+--           and quietly stops matching nested files.
+-- {m..n}    EditorConfig: a numeric range, `{1..3}` matching `1`/`2`/`3`. nx.glob has
+--           no ranges — a comma-less `{…}` is one literal alternative.
+-- ```
+--
+-- Translating instead of matching (`nx.glob.to_regex` onto `nx.regex`) would not help:
+-- the divergence is in the *parse*, so the regex handed over would already mean the
+-- wrong thing. Everything else here — brace alternation, classes, `?`, `*` stopping at
+-- `/` — does agree, which is exactly why the mismatch is worth stating out loud: a
+-- swap to `nx.glob` looks correct and silently breaks `[**.js]` sections.
 
 local M = {}
 

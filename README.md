@@ -13,6 +13,10 @@ It applies the indentation, line-ending and charset properties on open, and trim
 whitespace on write when the project asks for it. Edit a project's `.editorconfig` in the editor and
 write it, and the new rules land on the open buffers straight away — no reload.
 
+Async, but not a race: the resolution rides nxvim's gated read chain, so `FileType` — and every
+ftplugin, LSP attach and buffer-local mapping hanging off it — runs with the project's options
+already applied.
+
 ## Install
 
 Declare it with the built-in `:Plugins` manager and run `:PluginSync`. There is nothing to

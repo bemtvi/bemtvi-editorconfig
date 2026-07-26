@@ -10,6 +10,14 @@
 -- filesystem leg over the wire otherwise, so it works on every front end including
 -- the browser edit-host.
 --
+-- The read handler **returns** its promise, so nxvim's gated read chain waits for the
+-- resolution: `BufReadPost` -> settle -> `FileType` -> `BufEnter` -> `BufWinEnter`.
+-- Everything downstream of the read — an ftplugin-style `FileType` handler, an LSP
+-- attach, the statusline — therefore observes the EditorConfig-applied options rather
+-- than racing them. The wait is bounded by the editor's settle budget (500 ms), and
+-- the walk issues all of its reads at once precisely so that budget is never the
+-- binding constraint, even over a daemon.
+--
 -- The resolution is also live: writing a `.editorconfig` from inside the editor
 -- (`BufWritePost`) re-resolves — and re-applies — every open buffer it covers, with
 -- no reload. A property the edit *stops* specifying reverts to the value the buffer
@@ -19,7 +27,9 @@
 -- Toggle, mirroring neovim's editorconfig surface:
 --   * `vim.g.editorconfig = false` disables it globally (default: on).
 --   * `vim.b[bufnr].editorconfig = false` disables it for one buffer; a buffer's
---     explicit value (true/false) overrides the global one.
+--     explicit value (true/false) overrides the global one. Set from a `FileType`
+--     handler (the documented per-filetype opt-out) it arrives after the resolution,
+--     so the flag is re-read at `BufWinEnter` and what was applied is reverted.
 --
 -- Properties honored (the ones that map to a real nxvim option — per the
 -- EditorConfig spec, unrecognized/unsupported properties are simply ignored):
@@ -162,12 +172,36 @@ M.resolve = nx.async(function(bufnr, file)
   -- must be the same (absolute) spelling.
   file = nx.fname.modify(file, ":p")
   M._files[bufnr] = file
-  -- (dir, cfg) pairs, nearest directory first.
-  local chain = {}
+
+  -- Every ancestor directory, nearest first.
+  local dirs = {}
   for dir in nx.utils.ancestors(file) do
-    local ok, text = pcall(nx.await, nx.fs.read_text(dir .. "/.editorconfig"))
-    if ok and type(text) == "string" then
-      local cfg = parse.parse(text)
+    dirs[#dirs + 1] = dir
+  end
+
+  -- ONE concurrent batch, not an await-per-directory ladder. The obvious spelling —
+  -- read a directory's config, await it, then decide whether to keep climbing — costs
+  -- one round trip per level, which is free locally and the whole latency budget over a
+  -- daemon (a 10-deep path at 50 ms RTT is half a second). Since the read chain now
+  -- *waits* for this resolution, that ladder would be what stalls `FileType`. Firing
+  -- every level at once makes the walk one round trip deep regardless of nesting.
+  --
+  -- The cost is reading a few configs above a `root = true` that the merge then ignores
+  -- — bounded by the path depth, and they are discarded below rather than applied.
+  -- `all_settled` never rejects, so a level with no `.editorconfig` (the common case)
+  -- arrives as a rejected outcome rather than aborting the batch.
+  local reads = {}
+  for i, dir in ipairs(dirs) do
+    reads[i] = nx.fs.read_text(dir .. "/.editorconfig")
+  end
+  local settled = nx.await(nx.promise.all_settled(reads))
+
+  -- (dir, cfg) pairs, nearest directory first — the climb, now over results in hand.
+  local chain = {}
+  for i, dir in ipairs(dirs) do
+    local outcome = settled[i]
+    if outcome.status == "fulfilled" and type(outcome.value) == "string" then
+      local cfg = parse.parse(outcome.value)
       chain[#chain + 1] = { dir = dir, cfg = cfg }
       if cfg.root then
         break
@@ -218,9 +252,11 @@ end
 --
 -- Deliberately NOT `nx.cmd([[%s/\s+$//]])`, which is both slower and wrong here: the
 -- ex-command runs the regex engine over every line even when nothing matches (~170 ms
--- on a clean 20k-line buffer, versus ~4 ms for the scan below), moves the cursor,
--- clobbers the search register, and echoes `E486: Pattern not found` on every save of
--- an already-clean file — nxvim's `:s` has no `e` flag and no `silent!`.
+-- on a clean 20k-line buffer, versus ~4 ms for the scan below), moves the cursor and
+-- clobbers the search register, and — since nxvim's `:s` has no `e` flag — echoes
+-- `E486: Pattern not found` on every save of an already-clean file. nxvim now *does*
+-- have the modifier (`nx.cmd(cmd, { emsg_silent = true })` runs it under `:silent!`),
+-- but suppressing the error only hides the last of those four problems.
 --
 -- Two things keep this cheap. The scan rejects a line in O(1): only a line whose LAST
 -- byte is a space or tab can have trailing whitespace, so the (C-implemented) pattern
@@ -278,8 +314,13 @@ end
 
 -- Kick a resolution off and report a failure on the message line rather than
 -- letting the rejection go unhandled.
+--
+-- Returns a promise the caller can hand back to the editor. `:catch` is what makes
+-- that safe to return from an autocmd: it yields a promise that always *fulfils*, so
+-- a failed resolution (an unreadable `.editorconfig`, a dead daemon) is reported and
+-- the gated read chain moves on, rather than the rejection propagating into it.
 local function run(bufnr, file)
-  M.resolve(bufnr, file):catch(function(err)
+  return M.resolve(bufnr, file):catch(function(err)
     nx.notify("nxvim-editorconfig: " .. tostring(err), vim.log.levels.WARN)
   end)
 end
@@ -310,12 +351,41 @@ function M.setup(opts)
     if type(file) ~= "string" or file == "" or not enabled(bufnr) then
       return
     end
-    -- Fire-and-forget: the async chain settles over the next few ticks.
-    run(bufnr, file)
+    -- Only ordinary file buffers. `'buftype'` is the canonical signal for "this is a
+    -- real file, not a scratch surface": help, terminal, quickfix and `nofile` docks
+    -- all announce like a read (help genuinely *is* a file on disk), and EditorConfig
+    -- has no business setting `'expandtab'` on any of them. It matters more now that
+    -- the read chain waits for us — without this gate, opening `:help` would park
+    -- `FileType` behind a filesystem walk for a buffer nobody edits.
+    if (nx.bo[bufnr].buftype or "") ~= "" then
+      return
+    end
+    -- RETURNED, not fire-and-forget: nxvim's read chain is gated on the promise a
+    -- handler hands back, so returning it is what orders `FileType` (and everything
+    -- after it) behind the resolution instead of racing it.
+    return run(bufnr, file)
   end
 
   nx.on("BufReadPost", { group = grp }, on_open)
   nx.on("BufNewFile", { group = grp }, on_open)
+
+  -- Honor an opt-out that arrives *after* the resolution. The documented way to exempt
+  -- one filetype is a `FileType` handler setting `vim.b[buf].editorconfig = false` —
+  -- and `FileType` is a whole stage behind `BufReadPost` in the read chain, so by the
+  -- time it runs the options are already on the buffer. Re-reading the flag at
+  -- `BufWinEnter`, the stage after `FileType` (and after `BufEnter`), is what makes
+  -- that recipe work: nothing registered during the read can still be pending there.
+  --
+  -- Reverting is `apply` with no properties — the same path an emptied `.editorconfig`
+  -- takes — so only the options this plugin actually set go back to their baseline and
+  -- a manual `:setlocal` is left alone. It is idempotent, so the later `BufWinEnter`s
+  -- of an ordinary window switch cost one table lookup and do nothing.
+  nx.on("BufWinEnter", { group = grp }, function(ev)
+    local applied = M._applied[ev.buf]
+    if applied and next(applied) ~= nil and not enabled(ev.buf) then
+      apply(ev.buf, {})
+    end
+  end)
 
   -- The write-time transforms. `BufWritePre` fires BEFORE the buffer is serialized
   -- (and the write waits for an async handler), so a mutation here is what reaches
@@ -336,9 +406,16 @@ function M.setup(opts)
   -- the ones under its directory — so an edit lands on them without a reload. Only a
   -- write *through the editor* is caught, which is the case that matters (you edited
   -- the project's rules); an outside change still applies on the next read.
-  nx.on("BufWritePost", { group = grp }, function(ev)
+  --
+  -- `**/.editorconfig` is the pattern for "the basename is exactly `.editorconfig`":
+  -- `**/` spans zero components too, so it covers both a buffer named by an absolute
+  -- path and one named relatively, while `foo.editorconfig` is excluded (a bare
+  -- `*.editorconfig` would match it). Patterns compile to a cached Rust regex at
+  -- registration, so this is cheaper than the basename compare it replaces — and an
+  -- invalid pattern would raise here rather than silently never firing.
+  nx.on("BufWritePost", { group = grp, pattern = "**/.editorconfig" }, function(ev)
     local file = ev.file
-    if type(file) ~= "string" or nx.utils.basename(file) ~= ".editorconfig" then
+    if type(file) ~= "string" or file == "" then
       return
     end
     local dir = nx.utils.dirname(nx.fname.modify(file, ":p")) .. "/"

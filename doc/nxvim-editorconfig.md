@@ -67,7 +67,7 @@ or not — is readable through `properties()` below, so a config can act on it i
 ```lua
 local props = require("nxvim-editorconfig").properties(0)
 if props and props.max_line_length then
-  vim.o.colorcolumn = props.max_line_length
+  nx.wo.colorcolumn = props.max_line_length   -- 'colorcolumn' is window-local
 end
 ```
 
@@ -87,6 +87,31 @@ The rules follow the EditorConfig specification:
 
 A buffer opened by a relative path (`nxvim src/main.rs`, `:e sub/file.txt`) is resolved against the
 editor's working directory first, so the walk still reaches the project root.
+
+Only ordinary file buffers are resolved. A scratch surface — help, a terminal, quickfix, an
+`nx.view` dock — is skipped on its `'buftype'`, so EditorConfig never sets `'expandtab'` on a
+listing you cannot edit.
+
+# Ordering
+
+The resolution is async, but it is not a race. nxvim's read lifecycle is a **gated chain** —
+`BufReadPost` → *settle* → `FileType` → `BufEnter` → `BufWinEnter` — and this plugin's read handler
+returns its promise into it. So by the time `FileType` fires, the EditorConfig options are already
+applied, and everything hanging off `FileType` (an ftplugin-style handler, an LSP attach, a
+buffer-local mapping) reads the project's values rather than the defaults:
+
+```lua
+nx.on("FileType", {}, function(args)
+  -- Already the .editorconfig value, not the default it would otherwise have raced.
+  print(nx.bo[args.buf].shiftwidth)
+end)
+```
+
+The editor waits up to its settle budget (500 ms) for this. The walk reads every directory level
+**concurrently** rather than one round trip per level, so a deeply nested file over a daemon still
+resolves in a single round trip and the budget is not the binding constraint. If a filesystem is
+slow enough to blow it anyway, the chain advances without waiting further and the options are
+applied when the read lands — late, never dropped.
 
 # Live reload
 
@@ -119,18 +144,23 @@ vim.b[bufnr].editorconfig = false   -- ...or a specific one
 ```
 
 A buffer's explicit value wins over the global one. Both are read on every resolution, so flipping
-either takes effect from the next resolution onward — for the current buffer, `:e!` to re-fire it.
+either takes effect from the next resolution onward — for a buffer already open, `:e!` to re-fire
+it.
 
 Opting one filetype out while leaving the rest on:
 
 ```lua
-nx.on("FileType", function(args)
+nx.on("FileType", {}, function(args)
   if args.match == "markdown" then
     -- Prose: let your own settings win, not the project's .editorconfig.
     vim.b[args.buf].editorconfig = false
   end
 end)
 ```
+
+That works even though `FileType` runs a stage *after* the resolution (see
+[Ordering](#ordering)): the plugin reads the flag once more at the end of the read chain and puts
+back what it applied. Only the options it set are reverted, so a `:setlocal` of your own survives.
 
 `setup({ enabled = false })` is the load-time equivalent: it registers no autocmds at all, leaving
 the plugin inert for the session.
@@ -165,23 +195,36 @@ The autocmds call this; you only need it to force a resolution by hand.
 
 Everything is public `nx.*`, and worth reading if you are writing a plugin:
 
-- `nx.on` / `nx.augroup` — `BufReadPost` / `BufNewFile` drive the first resolution, `BufWritePre`
-  the trim, `BufWritePost` the live reload, `BufDelete` the cleanup.
-- `nx.fs.read_text` inside `nx.async` / `nx.await` — the upward walk is a chain of async reads, so
-  a slow or remote filesystem never stalls a keystroke.
+- `nx.on` / `nx.augroup` — `BufReadPost` / `BufNewFile` drive the first resolution, `BufWinEnter`
+  the late opt-out check, `BufWritePre` the trim, `BufWritePost` the live reload, `BufDelete` the
+  cleanup. The read handler **returns**
+  its promise, which is what orders the rest of the read chain behind it (see
+  [Ordering](#ordering)); the live-reload handler is narrowed by the autocmd `pattern`
+  `**/.editorconfig`, which matches that basename at any depth — absolute or relative — without
+  matching `foo.editorconfig`.
+- `nx.fs.read_text` inside `nx.async` / `nx.await`, fanned out with `nx.promise.all_settled` — every
+  directory level is read at once rather than one await per level, so the walk is one round trip
+  deep however deep the file is. A slow or remote filesystem never stalls a keystroke either way.
 - `nx.utils.ancestors` / `nx.fname.modify` — the upward directory walk and the relative→absolute
   resolution behind it.
-- `nx.bo[bufnr]` — the buffer options the properties map onto.
+- `nx.bo[bufnr]` — the buffer options the properties map onto, and `'buftype'` as the canonical
+  "is this a real file" signal.
 - `nx.buf.lines` / `nx.buf.set_lines` — the trim reads the buffer mirror, rejects a line in O(1)
   (only a line whose last byte is a space or tab can have trailing whitespace, so the pattern match
   runs solely on lines that need it), and issues at most ONE edit. The obvious
   `nx.cmd([[%s/\s+$//]])` is 2–12x slower on the same buffer — it runs the regex engine over every
-  line even when nothing matches — and echoes `E486: Pattern not found` on every save of an
-  already-clean file, since nxvim's `:s` has no `e` flag and no `silent!`.
+  line even when nothing matches — moves the cursor, clobbers the search register, and echoes
+  `E486: Pattern not found` on every save of an already-clean file, since nxvim's `:s` has no `e`
+  flag. (`nx.cmd(cmd, { emsg_silent = true })` would silence that last one, and none of the rest.)
 
-The glob dialect is the plugin's own (`nxvim-editorconfig.glob`): brace expansion into plain globs,
-then a backtracking matcher. The parser (`nxvim-editorconfig.parse`) turns one file into its
-`root` flag plus its sections in file order.
+The parser (`nxvim-editorconfig.parse`) turns one file into its `root` flag plus its sections in
+file order. The glob dialect is the plugin's own (`nxvim-editorconfig.glob`): brace expansion into
+plain globs, then a backtracking matcher. That is deliberate, not an oversight — nxvim ships one
+glob engine in `nx.glob`, but EditorConfig's dialect differs from it in two ways that matter:
+`**` crosses `/` **anywhere** (so `[**.js]` matches `a/b/c.js`, where `nx.glob` treats `**` as
+recursive only when it is a whole path component), and `{1..9}` is a numeric range, which `nx.glob`
+has no notion of. Both divergences are pinned as tests in `test/glob_spec.lua`, so if the core ever
+grows the dialect, those tests fail and this module can go.
 
 # Tests
 

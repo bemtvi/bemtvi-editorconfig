@@ -1,16 +1,16 @@
--- Runnable example for nxvim-editorconfig.
+-- Runnable example for bemtvi-editorconfig.
 --
---   NXVIM_CONFIG=examples nxvim examples/app.py
+--   BEMTVI_CONFIG=examples bemtvi examples/app.py
 --
 -- Each section has a *type-this / see-that* note.
 
 -- Load the plugin straight from this repo (a local-dev spec: `dir` is never cloned, and
--- adding it to the runtimepath is what makes `require("nxvim-editorconfig")` resolve and
+-- adding it to the runtimepath is what makes `require("bemtvi-editorconfig")` resolve and
 -- auto-sources `plugin/`, which calls `setup({})`). A real config would instead use
--- `{ "nxvim/nxvim-editorconfig" }` + :PluginSync — there is nothing to configure.
-nx.plugins({
+-- `{ "bemtvi/bemtvi-editorconfig" }` + :PluginSync — there is nothing to configure.
+btv.plugins({
   {
-    name = "nxvim-editorconfig",
+    name = "bemtvi-editorconfig",
     dir = vim.fn.expand("<sfile>:p:h:h"), -- the repo root (this file's grandparent dir)
   },
 })
@@ -39,11 +39,11 @@ nx.plugins({
 --    A buffer's explicit value wins over the global one. For example, opt one
 --    filetype out while leaving the rest on:
 --
---    This works even though `FileType` runs a stage AFTER the resolution: nxvim's
+--    This works even though `FileType` runs a stage AFTER the resolution: bemtvi's
 --    read chain is gated (BufReadPost -> settle -> FileType -> BufEnter ->
 --    BufWinEnter), and the plugin re-reads the flag at the end of it, reverting what
 --    it applied. Which is also why the print below already sees the project's value.
-nx.on("FileType", {}, function(args)
+btv.on("FileType", {}, function(args)
   if args.match == "markdown" then
     -- Prose: let your own settings win, not the project's .editorconfig.
     vim.b[args.buf].editorconfig = false
@@ -53,19 +53,19 @@ end)
 -- 1b. The ordering guarantee, made visible: this runs on FileType, one stage behind
 --     the resolution, so `shiftwidth` is already the .editorconfig value rather than
 --     the default it would otherwise have raced.
-nx.on("FileType", {}, function(args)
-  nx.notify(
-    ("FileType %s: shiftwidth is already %d"):format(args.match, nx.bo[args.buf].shiftwidth)
+btv.on("FileType", {}, function(args)
+  btv.notify(
+    ("FileType %s: shiftwidth is already %d"):format(args.match, btv.bo[args.buf].shiftwidth)
   )
 end)
 
 -- 2. Inspect the resolved properties for a buffer (handy for debugging a project's
---    rules, and the way to reach properties with no nxvim option, e.g.
+--    rules, and the way to reach properties with no bemtvi option, e.g.
 --    trim_trailing_whitespace / max_line_length):
-nx.command("EditorConfigShow", function()
-  local props = require("nxvim-editorconfig").properties(0)
+btv.command("EditorConfigShow", function()
+  local props = require("bemtvi-editorconfig").properties(0)
   if not props then
-    nx.notify("no .editorconfig resolved for this buffer")
+    btv.notify("no .editorconfig resolved for this buffer")
     return
   end
   local parts = {}
@@ -73,7 +73,7 @@ nx.command("EditorConfigShow", function()
     parts[#parts + 1] = k .. " = " .. tostring(v)
   end
   table.sort(parts)
-  nx.notify("editorconfig: " .. table.concat(parts, ", "))
+  btv.notify("editorconfig: " .. table.concat(parts, ", "))
 end)
 
 --------------------------------------------------------------------------------

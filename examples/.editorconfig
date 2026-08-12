@@ -1,4 +1,4 @@
-; EditorConfig (https://editorconfig.org) — nxvim reads this automatically.
+; EditorConfig (https://editorconfig.org) — bemtvi reads this automatically.
 ; `root = true` stops the upward search here (no parent .editorconfig leaks in).
 root = true
 

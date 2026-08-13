@@ -1,6 +1,6 @@
 # bemtvi-editorconfig
 
-[EditorConfig](https://editorconfig.org) support for [bemtvi](https://github.com/davidrios/bemtvi),
+[EditorConfig](https://editorconfig.org) support for [bemtvi](https://github.com/bemtvi/bemtvi),
 built **entirely on the native `btv.*` plugin API** — nothing about `.editorconfig` lives in the
 editor core.
 

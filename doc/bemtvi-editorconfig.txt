@@ -1,23 +1,23 @@
-*bemtvi-editorconfig.txt*                        EditorConfig support for bemtvi
+*bemtvi-editorconfig.txt*                      EditorConfig support for bemtvi
 
 ==============================================================================
-Table of Contents                       *bemtvi-editorconfig-table-of-contents*
+Table of Contents                      *bemtvi-editorconfig-table-of-contents*
 
-1. Install                                        |bemtvi-editorconfig-install|
-2. Properties                                  |bemtvi-editorconfig-properties|
-3. Resolution                                  |bemtvi-editorconfig-resolution|
-4. Ordering                                      |bemtvi-editorconfig-ordering|
-5. Live reload                                |bemtvi-editorconfig-live-reload|
-6. Toggles                                        |bemtvi-editorconfig-toggles|
-7. API                                                |bemtvi-editorconfig-api|
-  - setup                                       |bemtvi-editorconfig-api-setup|
-  - properties                             |bemtvi-editorconfig-api-properties|
-  - resolve                                   |bemtvi-editorconfig-api-resolve|
-8. How it works                              |bemtvi-editorconfig-how-it-works|
-9. Tests                                            |bemtvi-editorconfig-tests|
+1. Install                                       |bemtvi-editorconfig-install|
+2. Properties                                 |bemtvi-editorconfig-properties|
+3. Resolution                                 |bemtvi-editorconfig-resolution|
+4. Ordering                                     |bemtvi-editorconfig-ordering|
+5. Live reload                               |bemtvi-editorconfig-live-reload|
+6. Toggles                                       |bemtvi-editorconfig-toggles|
+7. API                                               |bemtvi-editorconfig-api|
+  - setup                                      |bemtvi-editorconfig-api-setup|
+  - properties                            |bemtvi-editorconfig-api-properties|
+  - resolve                                  |bemtvi-editorconfig-api-resolve|
+8. How it works                             |bemtvi-editorconfig-how-it-works|
+9. Tests                                           |bemtvi-editorconfig-tests|
 
-EditorConfig support for bemtvi, built entirely on the native `btv.*` plugin API
-— nothing about `.editorconfig` lives in the editor core.
+EditorConfig support for bemtvi, built entirely on the native `btv.*` plugin
+API — nothing about `.editorconfig` lives in the editor core.
 
 Open a file and the plugin walks the directory tree upward from it, reads every
 `.editorconfig` along the way (stopping at one that declares `root = true`),
@@ -33,7 +33,7 @@ the new rules to the open buffers straight away — no reload.
 
 
 ==============================================================================
-1. Install                                        *bemtvi-editorconfig-install*
+1. Install                                       *bemtvi-editorconfig-install*
 
 Put the repo on your `runtimepath` — with `btv.plugins`, or any plugin
 manager. `plugin/bemtvi-editorconfig.lua` auto-sources on load and registers
@@ -50,7 +50,7 @@ project that has a `.editorconfig` and its rules are in effect.
 
 
 ==============================================================================
-2. Properties                                  *bemtvi-editorconfig-properties*
+2. Properties                                 *bemtvi-editorconfig-properties*
 
 These EditorConfig properties map onto a real bemtvi option and are applied:
 
@@ -93,7 +93,7 @@ ignored. Everything resolved — applied or not — is readable through
 
 
 ==============================================================================
-3. Resolution                                  *bemtvi-editorconfig-resolution*
+3. Resolution                                 *bemtvi-editorconfig-resolution*
 
 The rules follow the EditorConfig specification:
 
@@ -117,7 +117,7 @@ EditorConfig never sets `'expandtab'` on a listing you cannot edit.
 
 
 ==============================================================================
-4. Ordering                                      *bemtvi-editorconfig-ordering*
+4. Ordering                                     *bemtvi-editorconfig-ordering*
 
 The resolution is async, but it is not a race. bemtvi's read lifecycle is a
 **gated chain** — `BufReadPost` → _settle_ → `FileType` → `BufEnter`
@@ -143,7 +143,7 @@ applied when the read lands — late, never dropped.
 
 
 ==============================================================================
-5. Live reload                                *bemtvi-editorconfig-live-reload*
+5. Live reload                               *bemtvi-editorconfig-live-reload*
 
 Writing a `.editorconfig` from inside the editor re-resolves — and re-applies
 — every open buffer that the written file governs (the ones under its
@@ -167,7 +167,7 @@ since you edited the project's rules. A change made outside the editor (a
 
 
 ==============================================================================
-6. Toggles                                        *bemtvi-editorconfig-toggles*
+6. Toggles                                       *bemtvi-editorconfig-toggles*
 
 The same surface neovim's built-in editorconfig exposes:
 
@@ -202,10 +202,10 @@ autocmds at all, leaving the plugin inert for the session.
 
 
 ==============================================================================
-7. API                                                *bemtvi-editorconfig-api*
+7. API                                               *bemtvi-editorconfig-api*
 
 
-SETUP                                           *bemtvi-editorconfig-api-setup*
+SETUP                                          *bemtvi-editorconfig-api-setup*
 
 `require("bemtvi-editorconfig").setup(opts)`
 
@@ -215,7 +215,7 @@ Re-running is safe — the augroup is cleared first. `opts.enabled = false`
 registers nothing.
 
 
-PROPERTIES                                 *bemtvi-editorconfig-api-properties*
+PROPERTIES                                *bemtvi-editorconfig-api-properties*
 
 `require("bemtvi-editorconfig").properties(bufnr)`
 
@@ -225,7 +225,7 @@ including properties the plugin does not act on, so you can act on them
 yourself. Returns `nil` until the buffer's (async) resolution has settled.
 
 
-RESOLVE                                       *bemtvi-editorconfig-api-resolve*
+RESOLVE                                      *bemtvi-editorconfig-api-resolve*
 
 `require("bemtvi-editorconfig").resolve(bufnr, file)`
 
@@ -235,7 +235,7 @@ resolution by hand.
 
 
 ==============================================================================
-8. How it works                              *bemtvi-editorconfig-how-it-works*
+8. How it works                             *bemtvi-editorconfig-how-it-works*
 
 Everything is public `btv.*`, and worth reading if you are writing a plugin:
 
@@ -268,13 +268,13 @@ backtracking matcher. That is deliberate, not an oversight — bemtvi ships one
 glob engine in `btv.glob`, but EditorConfig's dialect differs from it in two
 ways that matter: `**` crosses `/` **anywhere** (so `[**.js]` matches
 `a/b/c.js`, where `btv.glob` treats `**` as recursive only when it is a whole
-path component), and `{1..9}` is a numeric range, which `btv.glob` has no notion
-of. Both divergences are pinned as tests in `test/glob_spec.lua`, so if the
-core ever grows the dialect, those tests fail and this module can go.
+path component), and `{1..9}` is a numeric range, which `btv.glob` has no
+notion of. Both divergences are pinned as tests in `test/glob_spec.lua`, so if
+the core ever grows the dialect, those tests fail and this module can go.
 
 
 ==============================================================================
-9. Tests                                            *bemtvi-editorconfig-tests*
+9. Tests                                           *bemtvi-editorconfig-tests*
 
 The suite runs a real editor headlessly:
 
